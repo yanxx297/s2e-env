@@ -88,7 +88,9 @@ else
 
     LD_PRELOAD=$LIBS2E $QEMU $QEMU_DRIVE \
         -k en-us $GRAPHICS -monitor null -m $QEMU_MEMORY -enable-kvm \
-        -serial file:serial.txt $QEMU_EXTRA_FLAGS \
+        -serial file:serial.txt \
+        -serial file:serial_klog.txt \
+	$QEMU_EXTRA_FLAGS \
         -loadvm $QEMU_SNAPSHOT $* &
 
     CHILD_PID=$!
