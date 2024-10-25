@@ -32,7 +32,8 @@ import shutil
 from s2e_env import CONSTANTS
 from s2e_env.command import EnvCommand, CommandError
 from s2e_env.utils.images import ImageDownloader, get_image_templates, \
-        get_image_descriptor, select_guestfs
+        get_image_descriptor, select_guestfs, split_image_name, \
+        check_host_incompatibility, select_best_image
 
 from .utils import ConfigEncoder
 
@@ -41,6 +42,8 @@ logger = logging.getLogger('new_project')
 # Paths
 FILE_DIR = os.path.dirname(__file__)
 LIBRARY_LUA_PATH = os.path.join(FILE_DIR, '..', '..', 'dat', 'library.lua')
+
+SUPPORTED_TOOLS = ['pov', 'cfi', 'tickler']
 
 
 def symlink_guest_tools(install_path, project_dir, img_desc):
@@ -83,6 +86,40 @@ def symlink_guestfs(project_dir, guestfs_paths):
         path = guestfs_paths[0]
         logger.info('Creating a symlink to %s', path)
         os.symlink(path, os.path.join(project_dir, 'guestfs'))
+
+
+def validate_arguments(options):
+    """
+    Check that arguments are consistent.
+    """
+
+    tools = options.get('tools', [])
+    for tool in tools:
+        if tool not in SUPPORTED_TOOLS:
+            raise CommandError(f'The specified tool "{tool}" is not supported')
+
+    options['enable_pov_generation'] = 'pov' in tools
+    options['enable_cfi'] = 'cfi' in tools
+    options['enable_tickler'] = 'tickler' in tools
+
+    has_errors = False
+    if options.get('single_path'):
+        if options.get('use_seeds'):
+            logger.error('Cannot use seeds in single-path mode')
+            has_errors = True
+
+        if options.get('enable_pov_generation'):
+            logger.error('Cannot use POV generation in single-path mode')
+            has_errors = True
+
+        if '@@' in options.get('target_args', []):
+            logger.error('Cannot use symbolic input in single-path mode')
+            has_errors = True
+
+    if has_errors:
+        return False
+
+    return True
 
 
 class AbstractProject(EnvCommand):
@@ -192,6 +229,22 @@ class AbstractProject(EnvCommand):
         if not image:
             image = self._guess_image(target, img_templates)
 
+        base_image_name, app_image_name = split_image_name(image)
+        if app_image_name:
+            # Don't do any validation on app images yet.
+            return self._get_or_download_image(img_templates, image, download_image)
+
+        if image not in img_templates:
+            raise CommandError(f'Unknown guest image {image}. Run s2e image_build for a list of supported images.')
+
+        supported_images = self.get_usable_images(target, img_templates)
+        if not supported_images:
+            raise CommandError('No suitable image available for this target.')
+
+        if image not in supported_images:
+            raise CommandError(f'Chosen image {image} is not compatbile with the target.')
+
+        check_host_incompatibility(img_templates, base_image_name)
         return self._get_or_download_image(img_templates, image, download_image)
 
     def _guess_image(self, target, img_templates):
@@ -203,16 +256,17 @@ class AbstractProject(EnvCommand):
         logger.info('No image was specified (-i option). Attempting to guess '
                     'a suitable image for a %s binary...', target.arch)
 
-        images = self.get_usable_images(target, img_templates)
-        if not images:
+        usable_images = self.get_usable_images(target, img_templates)
+        if not usable_images:
             raise CommandError('No suitable image available for this target')
 
-        image = images[0]
+        selected_image = select_best_image(img_templates, usable_images)
+
         logger.warning('Found %s, which looks suitable for this '
                        'binary. Please use -i if you want to use '
-                       'another image', image)
+                       'another image', selected_image)
 
-        return image
+        return selected_image
 
     def get_usable_images(self, target, image_templates):
         """
@@ -264,10 +318,13 @@ class AbstractProject(EnvCommand):
         # when images are rebuilt. Instead, always use latest images.json
         # in guest-images repo. This avoids forcing users to create new projects
         # everytime guest image parameters change.
-        config_copy['image'] = os.path.dirname(config['image']['path'])
+        if config['image'].get('path', None):
+            config_copy['image'] = os.path.dirname(config['image']['path'])
+        else:
+            config_copy['image'] = None
 
         project_desc_path = os.path.join(project_dir, 'project.json')
-        with open(project_desc_path, 'w') as f:
+        with open(project_desc_path, 'w', encoding='utf-8') as f:
             s = json.dumps(config_copy, sort_keys=True, indent=4, cls=ConfigEncoder)
             f.write(s)
 

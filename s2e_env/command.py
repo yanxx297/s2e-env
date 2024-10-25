@@ -60,11 +60,11 @@ class CommandParser(ArgumentParser):
     """
     def __init__(self, cmd, **kwargs):
         self._cmd = cmd
-        super(CommandParser, self).__init__(**kwargs)
+        super().__init__(**kwargs)
 
     def error(self, message):
         if self._cmd.called_from_command_line:
-            super(CommandParser, self).error(message)
+            super().error(message)
         else:
             raise CommandError(message)
 
@@ -114,7 +114,7 @@ class BaseCommand(metaclass=ABCMeta):
         the arguments to this command.
         """
         parser = CommandParser(
-            self, prog='%s %s' % (os.path.basename(prog_name), subcommand),
+            self, prog=f'{os.path.basename(prog_name)} {subcommand}',
             description=self.help or None)
 
         # Add any arguments that all commands should accept here
@@ -177,7 +177,7 @@ class BaseCommand(metaclass=ABCMeta):
 
     @property
     def name(self):
-        return self.__module__.split('.')[-1]
+        return self.__module__.rsplit('.', maxsplit=1)[-1]
 
     @abstractmethod
     def handle(self, *args, **options):
@@ -197,7 +197,7 @@ class EnvCommand(BaseCommand):
     """
 
     def __init__(self):
-        super(EnvCommand, self).__init__()
+        super().__init__()
 
         self._env_dir = None
         self._config = None
@@ -218,16 +218,16 @@ class EnvCommand(BaseCommand):
 
         try:
             path = self.env_path('s2e.yaml')
-            with open(path, 'r') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 self._config = yaml.safe_load(f)
         except IOError:
-            raise CommandError('This does not look like an S2E environment - '
-                               'it does not contain an s2e.yaml configuration '
-                               'file (%s does not exist). Source %s in your '
-                               'environment' % (path, self.env_path('s2e_activate')))
+            raise CommandError(f'This does not look like an S2E environment - '
+                               f'it does not contain an s2e.yaml configuration '
+                               f'file ({path} does not exist). Source {self.env_path("s2e_activate")} in your '
+                               f'environment') from None
 
     def add_arguments(self, parser):
-        super(EnvCommand, self).add_arguments(parser)
+        super().add_arguments(parser)
 
         parser.add_argument('-e', '--env', required=False, default=os.getcwd(),
                             help='The S2E environment. Only used if the '
@@ -288,7 +288,7 @@ class ProjectCommand(EnvCommand):
     """
 
     def __init__(self):
-        super(ProjectCommand, self).__init__()
+        super().__init__()
 
         self._project_dir = None
         self._project_desc = None
@@ -300,7 +300,7 @@ class ProjectCommand(EnvCommand):
         """
         Adds the project directory as a class member.
         """
-        super(ProjectCommand, self).handle_common_args(**options)
+        super().handle_common_args(**options)
 
         project = options['project']
         if os.path.isabs(project):
@@ -317,19 +317,19 @@ class ProjectCommand(EnvCommand):
         # Load the project description
         try:
             proj_desc_path = os.path.join(self._project_dir, 'project.json')
-            with open(proj_desc_path, 'r') as f:
+            with open(proj_desc_path, 'r', encoding='utf-8') as f:
                 self._project_desc = json.load(f)
         except IOError:
-            raise CommandError('%s does not look like an S2E analysis '
+            raise CommandError(f'{self._project_name} does not look like an S2E analysis '
                                'project - it does not contain a project.json '
                                'project description. Please check the project '
-                               'name' % self._project_name)
+                               'name') from None
 
         # Load the additional symbol paths
         self._sym_paths = options.pop('sympath')
 
     def add_arguments(self, parser):
-        super(ProjectCommand, self).add_arguments(parser)
+        super().add_arguments(parser)
 
         parser.add_argument('project', help='The name of the project')
         parser.add_argument('--sympath', action='append', required=False,

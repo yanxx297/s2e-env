@@ -81,10 +81,10 @@ def _user_belongs_to(group_name):
 
 
 def _raise_group_error(group_name):
-    raise CommandError('You must belong to the {0} group in order to build '
+    raise CommandError(f'You must belong to the {group_name} group in order to build '
                        'images. Please run the following command, then logout '
                        'and login:\n\n'
-                       '\tsudo usermod -a -G {0} $(whoami)'.format(group_name))
+                       f'\tsudo usermod -a -G {group_name} $(whoami)')
 
 
 def _check_groups_docker():
@@ -151,13 +151,13 @@ def _check_vmlinux():
     """
     try:
         for f in glob.glob(os.path.join(os.sep, 'boot', 'vmlinu*')):
-            with open(f):
+            with open(f, 'rb'):
                 pass
     except IOError:
         raise CommandError('Make sure that the kernels in /boot are readable. '
                            'This is required for guestfish. Please run the '
                            'following command:\n\n'
-                           'sudo chmod ugo+r /boot/vmlinu*')
+                           'sudo chmod ugo+r /boot/vmlinu*') from None
 
 
 # pylint: disable=no-member
@@ -194,8 +194,8 @@ def _check_cow(image_dir):
 
 
 def _raise_invalid_image(image_name):
-    raise CommandError('Invalid image name: %s. Run ``s2e image_build`` '
-                       'to list available images' % image_name)
+    raise CommandError(f'Invalid image name: {image_name}. Run ``s2e image_build`` '
+                       'to list available images')
 
 
 def _get_base_image_and_app(image_name):
@@ -257,13 +257,12 @@ def _check_iso(templates, app_templates, iso_dir, image_names):
             if not iso_dir:
                 raise CommandError(
                     'Please use the --iso-dir option to specify the path '
-                    'to a folder that contains %s' % name
+                    f'to a folder that contains {name}'
                 )
 
             path = os.path.join(iso_dir, name)
             if not os.path.exists(path):
-                raise CommandError('The image %s requires %s, which could not be '
-                                   'found' % (image_name, path))
+                raise CommandError(f'The image {image_name} requires {path}, which could not be found')
 
 
 def _is_port_available(port):
@@ -311,7 +310,7 @@ def _get_archive_rules(image_path, rule_names):
 
     archive_rules = []
     for r in rule_names:
-        archive_rules.append(os.path.join(image_path, '%s.tar.xz' % r))
+        archive_rules.append(os.path.join(image_path, f'{r}.tar.xz'))
 
     logger.info('The following archives will be built:')
     for a in archive_rules:
@@ -338,7 +337,7 @@ class Command(EnvCommand):
     help = 'Build an image.'
 
     def __init__(self):
-        super(Command, self).__init__()
+        super().__init__()
 
         self._headless = True
         self._use_kvm = True
@@ -346,7 +345,7 @@ class Command(EnvCommand):
         self._has_cow = False
 
     def add_arguments(self, parser):
-        super(Command, self).add_arguments(parser)
+        super().add_arguments(parser)
 
         parser.add_argument('name',
                             help='The name of the image to build. If empty,'
@@ -491,7 +490,7 @@ class Command(EnvCommand):
             make_image = make.bake(j=self._num_cores, r=True, warn_undefined_variables=True)
             make_image(sorted(rule_names))
         except ErrorReturnCode as e:
-            raise CommandError(e)
+            raise CommandError(e) from e
 
     def _clone_kernel(self):
         kernels_root = self.source_path(CONSTANTS['repos']['images']['linux'])
@@ -508,15 +507,14 @@ class Command(EnvCommand):
         img_build_dir = self.source_path(CONSTANTS['repos']['images']['build'])
         templates = get_image_templates(img_build_dir)
         if not templates:
+            images_json_path = os.path.join(img_build_dir, 'images.json')
             raise CommandError('No images available to build. Make sure that '
-                               '%s exists and is valid' %
-                               os.path.join(img_build_dir, 'images.json'))
+                               f'{images_json_path} exists and is valid')
 
         def get_max_len(lst):
             ret = 0
             for item in lst:
-                if len(item) > ret:
-                    ret = len(item)
+                ret = max(ret, len(item))
             return ret
 
         print('Available image groups:')
@@ -533,11 +531,11 @@ class Command(EnvCommand):
         img_build_dir = self.source_path(CONSTANTS['repos']['images']['build'])
         app_templates = get_app_templates(img_build_dir)
         if not app_templates:
+            apps_json_path = os.path.join(img_build_dir, 'apps.json')
             raise CommandError('No apps available to build. Make sure that '
-                               '%s exists and is valid' %
-                               os.path.join(img_build_dir, 'apps.json'))
+                               f'{apps_json_path} exists and is valid')
 
         print('Available applications:')
         for app_template, desc in sorted(app_templates.items()):
             for base_image in desc['base_images']:
-                print(' * %s/%s - %s' % (base_image, app_template, desc['name']))
+                print(f' * {base_image}/{app_template} - {desc["name"]}')

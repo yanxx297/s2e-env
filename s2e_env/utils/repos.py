@@ -39,13 +39,13 @@ def git_clone(git_repo_url, git_repo_dir):
         git.clone(git_repo_url, git_repo_dir, _out=sys.stdout,
                   _err=sys.stderr)
     except ErrorReturnCode as e:
-        raise CommandError(e)
+        raise CommandError(e) from e
 
 
 def git_clone_to_source(env_path, git_repo):
     git_url = CONSTANTS['repos']['url']
 
     git_repo_dir = os.path.join(env_path, 'source', git_repo)
-    git_repo_url = '%s/%s' % (git_url, git_repo)
+    git_repo_url = f'{git_url}/{git_repo}'
     git_clone(git_repo_url, git_repo_dir)
     logger.success('Fetched %s', git_repo)

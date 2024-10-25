@@ -41,7 +41,7 @@ class BinaryNinjaBasicBlockCoverage(BasicBlockCoverage):
     """
 
     def __init__(self):
-        super(BinaryNinjaBasicBlockCoverage, self).__init__()
+        super().__init__()
 
         self._bv = None
         self._binaryninja_mod = None
@@ -61,7 +61,7 @@ class BinaryNinjaBasicBlockCoverage(BasicBlockCoverage):
 
         binaryninja_py_dir = os.path.join(binaryninja_dir, 'python')
         if not os.path.isdir(binaryninja_py_dir):
-            raise CommandError('Binary Ninja not found at %s' % binaryninja_dir)
+            raise CommandError(f'Binary Ninja not found at {binaryninja_dir}')
 
         sys.path.append(binaryninja_py_dir)
         self._binaryninja_mod = importlib.import_module('binaryninja')
@@ -117,7 +117,8 @@ class BinaryNinjaBasicBlockCoverage(BasicBlockCoverage):
         # This lambda is used to retrieve the abstracted instruction type at a
         # given address. This is so that we don't have to deal with the various
         # call instructions that may be used in the underlying architecture
-        get_op = lambda addr: basic_block.function.get_low_level_il_at(addr).operation
+        def get_op(addr):
+            return basic_block.function.get_low_level_il_at(addr).operation
 
         for i, addr in enumerate(inst_addrs):
             op = get_op(addr)

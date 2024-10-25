@@ -51,7 +51,8 @@ _TRACE_ENTRY_MAP = {
     TraceEntries_pb2.TRACE_STATE_SWITCH: TraceEntries_pb2.PbTraceStateSwitch,
     TraceEntries_pb2.TRACE_BLOCK: TraceEntries_pb2.PbTraceTranslationBlock,
     TraceEntries_pb2.TRACE_CACHE_SIM_PARAMS: TraceEntries_pb2.PbTraceCacheSimParams,
-    TraceEntries_pb2.TRACE_CACHE_SIM_ENTRY: TraceEntries_pb2.PbTraceCacheSimEntry,
+    TraceEntries_pb2.TRACE_CFI_STATS: TraceEntries_pb2.PbTraceCfiStats,
+    TraceEntries_pb2.TRACE_CFI_VIOLATION: TraceEntries_pb2.PbTraceCfiViolation,
 }
 
 
@@ -227,7 +228,7 @@ class ExecutionTraceParser:
     def _read_trace_entry(trace_file):
         magic, raw_header_size = _HEADER_PREFIX.unpack(trace_file.read(8))
         if magic != 0xdeaddead:
-            raise Exception('Invalid magic in trace file (%#x)' % magic)
+            raise Exception(f'Invalid magic in trace file (0x{magic:x})')
 
         raw_header = trace_file.read(raw_header_size)
         raw_item_size = _INTEGER.unpack(trace_file.read(4))[0]
