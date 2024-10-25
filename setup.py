@@ -64,18 +64,21 @@ setup(
         'sh',
         'termcolor',
         'pytrie',
-        'pwntools==4.0.1',
+        'pwntools==4.3.1',
         'psutil',
         'protobuf3-to-dict',
         'immutables',
+        'alive_progress',
+        'protobuf==3.20.2',
 
         # Dependencies for symchk
         'pdbparse==1.5',
         'pefile==2019.4.18',
         'construct==2.9.52',
         'patool==1.12',
-        'pyunpack==0.1.2',
+        'pyunpack==0.2.2',
 
+        # FTP server used by image creation
         'pyftpdlib'
     ],
     tests_require=[
@@ -89,6 +92,7 @@ setup(
     package_data={
         's2e_env': [
             'templates/*',
+            'templates/plugin_creation/*',
             'dat/*',
         ],
     },

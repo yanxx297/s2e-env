@@ -52,9 +52,9 @@ def _link_existing_install(env_path, existing_install):
     # Check that the expected S2E installation directories exist
     for dir_ in ('bin', os.path.join('share', 'libs2e')):
         if not os.path.isdir(os.path.join(existing_install, dir_)):
-            raise CommandError('Invalid S2E installation - ``%s`` does not '
+            raise CommandError(f'Invalid S2E installation - ``{dir_}`` does not '
                                'exist. Are you sure that this directory '
-                               'contains a valid S2E installation?' % dir_)
+                               'contains a valid S2E installation?')
 
     logger.info('Using existing S2E installation at %s', existing_install)
 
@@ -71,7 +71,37 @@ def _link_existing_install(env_path, existing_install):
     repos.git_clone_to_source(env_path, guest_images_repo)
 
 
-def _install_dependencies(interactive):
+def _compute_dependencies():
+    version = _get_os_version()
+    if not version:
+        return []
+
+    os_name, major_version = version
+
+    logger.info('Detected OS:%s version:%s', os_name, major_version)
+
+    deps = CONSTANTS['dependencies']
+
+    all_install_packages = []
+
+    common = deps.get('common', [])
+    common_os = deps.get(f'common-{os_name}', [])
+    os_specific = deps.get(f'{os_name}-{major_version}')
+
+    if common:
+        all_install_packages += common
+        logger.debug('Common packages: %s', common)
+    if common_os:
+        all_install_packages += common_os
+        logger.debug('OS-common packages: %s', common_os)
+    if os_specific:
+        all_install_packages += os_specific
+        logger.debug('OS-specific packages: %s', os_specific)
+
+    return all_install_packages
+
+
+def _install_dependencies():
     """
     Install S2E's dependencies.
 
@@ -79,12 +109,9 @@ def _install_dependencies(interactive):
     """
     logger.info('Installing S2E dependencies')
 
-    ubuntu_ver = _get_ubuntu_version()
-    if not ubuntu_ver:
+    all_install_packages = _compute_dependencies()
+    if not all_install_packages:
         return
-
-    all_install_packages = CONSTANTS['dependencies']['common'] + \
-        CONSTANTS['dependencies'].get(f'ubuntu-{ubuntu_ver}', [])
 
     install_packages = []
     deb_package_urls = []
@@ -96,10 +123,9 @@ def _install_dependencies(interactive):
 
     install_opts = ['--no-install-recommends']
     env = {}
-    if not interactive:
-        logger.info('Running install in non-interactive mode')
-        env['DEBIAN_FRONTEND'] = 'noninteractive'
-        install_opts = ['-y'] + install_opts
+
+    env['DEBIAN_FRONTEND'] = 'noninteractive'
+    install_opts = ['-y'] + install_opts
 
     try:
         # Enable 32-bit libraries
@@ -111,7 +137,7 @@ def _install_dependencies(interactive):
         apt_get.update()
         apt_get.install(install_opts + install_packages)
     except ErrorReturnCode as e:
-        raise CommandError(e)
+        raise CommandError(e) from e
 
     # Install deb files at the end
     for url in deb_package_urls:
@@ -122,29 +148,26 @@ def _install_dependencies(interactive):
         apt_get.install(install_opts + [f'{filename}.deb'])
 
 
-def _get_ubuntu_version():
-    """
-    Gets the "major" Ubuntu version.
-
-    If an unsupported OS/Ubuntu version is found a warning is printed and
-    ``None`` is returned.
-    """
+def _get_os_version():
+    supported_oses = ['ubuntu', 'debian']
     id_name, version, _ = distro.linux_distribution(full_distribution_name=False)
+    id_name = id_name.lower()
 
-    if id_name.lower() != 'ubuntu':
-        logger.warning('You are running on a non-Ubuntu system. Skipping S2E '
-                       'dependencies - please install them manually')
+    if id_name not in supported_oses:
+        logger.warning('You are running an unsupported Linux distribution (%s %s). Skipping S2E '
+                       'dependencies - please install them manually', id_name, version)
+        logger.info('Supported OSes: %s', ", ".join(supported_oses))
         return None
 
     major_version = int(version.split('.')[0])
 
-    if major_version not in CONSTANTS['required_versions']['ubuntu_major_ver']:
-        logger.warning('You are running an unsupported version of Ubuntu. '
-                       'Skipping S2E dependencies  - please install them '
-                       'manually')
+    if major_version not in CONSTANTS['required_versions'][f'{id_name}_major_ver']:
+        logger.warning('You are running an unsupported version of %s (%s). '
+                       'Skipping S2E dependencies - please install them '
+                       'manually', id_name, version)
         return None
 
-    return major_version
+    return id_name, major_version
 
 
 def _get_s2e_sources(env_path, manifest_branch):
@@ -168,13 +191,13 @@ def _get_s2e_sources(env_path, manifest_branch):
     try:
         # Now use repo to initialize all the repositories
         logger.info('Fetching %s from %s', git_s2e_repo, git_url)
-        repo.init(u='%s/%s' % (git_url, git_s2e_repo), b=manifest_branch,
+        repo.init(u=f'{git_url}/{git_s2e_repo}', b=manifest_branch,
                   _out=sys.stdout, _err=sys.stderr)
         repo.sync(_out=sys.stdout, _err=sys.stderr)
     except ErrorReturnCode as e:
         # Clean up - remove the half-created S2E environment
         shutil.rmtree(env_path)
-        raise CommandError(e)
+        raise CommandError(e) from e
     finally:
         # Change back to the original directory
         os.chdir(orig_dir)
@@ -203,10 +226,10 @@ def _download_repo(repo_path):
     logger.info('Fetching repo')
 
     repo_url = CONSTANTS['repo']['url']
-    response = requests.get(repo_url)
+    response = requests.get(repo_url, timeout=3600)
 
     if response.status_code != 200:
-        raise CommandError('Unable to download repo from %s' % repo_url)
+        raise CommandError(f'Unable to download repo from {repo_url}')
 
     with open(repo_path, 'wb') as f:
         f.write(response.content)
@@ -225,10 +248,11 @@ def _create_config(env_path):
     s2e_yaml = 's2e.yaml'
     version_path = os.path.join(os.path.dirname(__file__), '..', 'dat', 'VERSION')
 
-    context = {
-        'creation_time': str(datetime.datetime.now()),
-        'version': open(version_path, 'r').read().strip(),
-    }
+    with open(version_path, 'r', encoding='utf-8') as fp:
+        context = {
+            'creation_time': str(datetime.datetime.now()),
+            'version': fp.read().strip(),
+        }
 
     render_template(context, s2e_yaml, os.path.join(env_path, s2e_yaml))
 
@@ -274,10 +298,6 @@ class Command(BaseCommand):
                                  'this location')
         parser.add_argument('-mb', '--manifest-branch', type=str, required=False, default='master',
                             help='Specify an alternate branch for the repo manifest')
-        parser.add_argument('-n', '--non-interactive', required=False,
-                            action='store_true', default=False,
-                            help='Install packages without user interaction. '
-                                 'This is useful for unattended installation.')
 
     def handle(self, *args, **options):
         env_path = os.path.realpath(options['dir'])
@@ -288,13 +308,12 @@ class Command(BaseCommand):
                 logger.info('%s already exists - removing', env_path)
                 shutil.rmtree(env_path)
             else:
-                raise CommandError('Something already exists at \'%s\'. '
+                raise CommandError(f'Something already exists at \'{env_path}\'. '
                                    'Please select a different location or use '
                                    'the ``force`` option to erase this '
                                    'environment.\n\nDid you mean to rebuild or '
                                    'update your existing environment? Try '
-                                   '``s2e build`` or ``s2e update`` instead' %
-                                   env_path)
+                                   '``s2e build`` or ``s2e update`` instead')
 
         try:
             # Create environment if it doesn't exist
@@ -312,10 +331,10 @@ class Command(BaseCommand):
             # Create the shell script to activate the environment
             _create_activate_script(env_path)
 
-            msg = 'Environment created in %s. You may wish to modify your ' \
-                  'environment\'s s2e.yaml config file. Source ``%s`` to ' \
-                  'activate your environment' % (env_path,
-                                                 os.path.join(env_path, 's2e_activate'))
+            s2e_activate_path = os.path.join(env_path, 's2e_activate')
+            msg = f'Environment created in {env_path}. You may wish to modify your ' \
+                  f'environment\'s s2e.yaml config file. Source ``{s2e_activate_path}`` to ' \
+                  'activate your environment'
 
             existing_install_path = options['use_existing_install']
             if existing_install_path:
@@ -323,13 +342,13 @@ class Command(BaseCommand):
             else:
                 # Install S2E's dependencies via apt-get
                 if not options['skip_dependencies']:
-                    _install_dependencies(not options['non_interactive'])
+                    _install_dependencies()
 
                 # Get the source repositories
                 _get_s2e_sources(env_path, options['manifest_branch'])
 
                 # Remind the user that they must build S2E
-                msg = '%s. Then run ``s2e build`` to build S2E' % msg
+                msg = f'{msg}. Then run ``s2e build`` to build S2E'
 
             logger.success(msg)
         except:

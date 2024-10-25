@@ -56,6 +56,9 @@ class DebugInfo(metaclass=ABCMeta):
     def add(self, filename, line, addr):
         self._lines.add(filename, line, addr)
 
+    def add_all(self, lines):
+        self._lines = LinesByAddr(lines)
+
     def get(self, addr):
         """
         Return line and function information for the given address.
@@ -153,7 +156,7 @@ class DebugInfo(metaclass=ABCMeta):
         except Exception as e:
             logger.debug(e, exc_info=1)
             errors.append(e)
-            err = 'Could not get JSON line information from %s' % target_path
+            err = f'Could not get JSON line information from {target_path}'
             errors.append(err)
 
         logger.error('Could not find debug information for %s', target_path)
@@ -168,12 +171,12 @@ class DebugInfo(metaclass=ABCMeta):
         for err in errors:
             logger.debug(err)
 
-        raise Exception('No usable line information available for %s' % target_path)
+        raise Exception(f'No usable line information available for {target_path}')
 
 
 class DwarfDebugInfo(DebugInfo):
     def __init__(self, path, search_paths=None, cls=ELFFile):
-        super(DwarfDebugInfo, self).__init__(path, search_paths)
+        super().__init__(path, search_paths)
 
         # This tracks the compilation units that have already been parsed
         self._cus = set()
@@ -258,13 +261,13 @@ class DwarfDebugInfo(DebugInfo):
             binary = self._class(f)
 
             if not binary.has_dwarf_info():
-                raise Exception('Could not find DWARF debug info in %s' % path)
+                raise Exception(f'Could not find DWARF debug info in {path}')
 
             dwarf_info = binary.get_dwarf_info()
             aranges = dwarf_info.get_aranges()
 
             if not aranges or not aranges._get_entries():
-                raise Exception('DWARF aranges section is missing or empty in %s' % path)
+                raise Exception(f'DWARF aranges section is missing or empty in {path}')
 
             self._dwarf_info = dwarf_info
             self._aranges = aranges
@@ -298,7 +301,7 @@ class DwarfDebugInfo(DebugInfo):
         except Exception as e:
             logger.debug(e, exc_info=1)
 
-        raise Exception('Could not find DWARF debug symbols for %s' % self.path)
+        raise Exception(f'Could not find DWARF debug symbols for {self.path}')
 
     # pylint: disable=protected-access
     # (accessing useful internal pyelftools methods)
@@ -322,7 +325,7 @@ class DwarfDebugInfo(DebugInfo):
 
 class Addrs2LinesDebugInfo(DebugInfo):
     def __init__(self, path, search_paths=None, s2e_prefix=''):
-        super(Addrs2LinesDebugInfo, self).__init__(path, search_paths)
+        super().__init__(path, search_paths)
         self._s2e_prefix = s2e_prefix
 
     def parse(self):
@@ -337,12 +340,15 @@ class Addrs2LinesDebugInfo(DebugInfo):
 
             lines = json.loads(stdout_data)
 
+            resolved_source_lines = {}
+
             for source_file, data in list(lines.items()):
                 file_path = guess_source_file_path(self._search_paths, source_file)
-                for line in data.get('lines', []):
-                    for address in line[1]:
-                        self.add(file_path, line[0], address)
-                        parsed = True
+                resolved_source_lines[file_path] = data
+                if data.get('lines', []):
+                    parsed = True
+
+            self.add_all(resolved_source_lines)
 
             if parsed:
                 break
@@ -379,8 +385,8 @@ class JsonDebugInfo(DebugInfo):
 
     def parse(self):
         candidates = [
-            '%s.lines' % self.path,
-            '%s.lines' % os.path.realpath(self.path)
+            f'{self.path}.lines',
+            f'{os.path.realpath(self.path)}.lines'
         ]
 
         for path in candidates:
@@ -388,7 +394,7 @@ class JsonDebugInfo(DebugInfo):
                 continue
 
             logger.debug('Attempting to parse JSON debug data from %s', path)
-            with open(path, 'r') as f:
+            with open(path, 'r', encoding='utf-8') as f:
                 lines = json.loads(f.read())
                 self._parse_info(lines)
                 return
@@ -411,13 +417,12 @@ def _invoke_addrs2_lines(s2e_prefix, target_path, json_in, include_covered_files
 
     args.append(target_path)
 
-    p = Popen(args, stdout=PIPE, stdin=PIPE)
+    with Popen(args, stdout=PIPE, stdin=PIPE) as p:
+        stdout_data = p.communicate(input=json_in.encode())[0]
+        if p.returncode:
+            raise Exception(f'addrs2lines failed with error code {p.returncode}')
 
-    stdout_data = p.communicate(input=json_in.encode())[0]
-    if p.returncode:
-        raise Exception('addrs2lines failed with error code %d' % p.returncode)
-
-    return stdout_data
+        return stdout_data
 
 
 def _get_coverage_fast(s2e_prefix, search_paths, target, addr_counts, include_covered_files_only):
@@ -487,7 +492,7 @@ class SymbolManager:
     def get_target(self, target):
         syms = self._get_syms(target)
         if not syms:
-            raise Exception('Could not find symbols for %s' % target)
+            raise Exception(f'Could not find symbols for {target}')
 
         return syms
 

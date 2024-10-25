@@ -25,6 +25,8 @@ SOFTWARE.
 import logging
 import os
 
+from s2e_env.utils.templates import render_template
+
 logger = logging.getLogger('target')
 
 
@@ -76,11 +78,14 @@ class TargetArguments:
             self._name_to_path[file] = path
 
             if not use_seeds:
-                with open(path, 'w') as fp:
+                with open(path, 'w', encoding='utf-8') as fp:
                     fp.write('x' * 256)
-                with open(path + '.symranges', 'w') as fp:
-                    fp.write('# This file specifies offset-size pairs to make symbolic\n')
-                    fp.write('0-256')
+
+                context = {
+                    'enable': True,
+                    'ranges': [(0, 256)]
+                }
+                render_template(context, 'symranges.template', output_path=f'{path}.symranges')
 
         self._blank_seed_files = blank_seed_file_paths
 
@@ -88,9 +93,12 @@ class TargetArguments:
             name = os.path.basename(file)
             path = os.path.join(root, name)
             self._name_to_path[name] = file
-            with open(path + '.symranges', 'w') as fp:
-                fp.write('# This file specifies offset-size pairs to make symbolic\n')
-                fp.write('# 0-0')
+
+            context = {
+                'enable': False,
+                'ranges': [(0, 0)]
+            }
+            render_template(context, 'symranges.template', output_path=f'{path}.symranges')
 
     @property
     def raw_args(self):
@@ -223,7 +231,7 @@ class Target:
         return not self._path
 
     def __str__(self):
-        return 'Target(path=%s,arch=%s)' % (self._path, self._arch)
+        return f'Target(path={self._path},arch={self._arch})'
 
     def toJSON(self):
         return {

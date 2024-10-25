@@ -49,6 +49,9 @@ def _init_template_env(templates_dir=None):
     if not templates_dir:
         templates_dir = DEFAULT_TEMPLATES_DIR
 
+    if not os.path.exists(templates_dir):
+        raise Exception(f'Directory {templates_dir} does not exist')
+
     env = Environment(loader=FileSystemLoader(templates_dir),
                       autoescape=False, undefined=StrictUndefined)
     env.filters['datetimefilter'] = _datetimefilter
@@ -78,7 +81,7 @@ def render_template(context, template, output_path=None, templates_dir=None,
     rendered_data = '\n'.join(cleaned_lines)
 
     if output_path:
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding='utf-8') as f:
             f.write(rendered_data)
 
         if executable:

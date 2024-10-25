@@ -24,11 +24,13 @@ import datetime
 import logging
 import multiprocessing
 import multiprocessing.dummy
-import signal
-import subprocess
 import os
+import signal
 import stat
+import subprocess
 import sys
+import threading
+import time
 import yaml
 
 import psutil
@@ -38,6 +40,7 @@ from s2e_env import CONSTANTS
 from s2e_env.command import EnvCommand, CommandError
 from s2e_env.manage import call_command
 from s2e_env.commands.new_project import target_from_file
+from s2e_env.commands.project_creation.abstract_project import validate_arguments
 from s2e_env.commands.run import send_signal_to_children_on_exit
 from s2e_env.utils.images import get_image_templates, get_app_templates, get_all_images, get_image_descriptor, \
                                  select_guestfs, translate_image_name
@@ -61,13 +64,18 @@ def _get_tests(testsuite_root):
 def _get_run_test_scripts(testsuite_root):
     tests = []
 
-    for fn in os.listdir(testsuite_root):
-        path = os.path.join(testsuite_root, fn)
-        run_tests_path = os.path.join(testsuite_root, path, 'run-tests')
-        if not os.path.exists(run_tests_path):
-            logger.warning('%s does not exist, skipping test project %s', run_tests_path, fn)
+    for test_name in os.listdir(testsuite_root):
+        for test_project in os.listdir(os.path.join(testsuite_root, test_name)):
+            path = os.path.join(testsuite_root, test_name, test_project)
+            if not os.path.isdir(path):
+                continue
 
-        tests.append(run_tests_path)
+            run_tests_path = os.path.join(testsuite_root, path, 'run-tests')
+            if not os.path.exists(run_tests_path):
+                logger.warning('%s does not exist, skipping test project %s/%s',
+                               run_tests_path, test_name, test_project)
+
+            tests.append(run_tests_path)
 
     return tests
 
@@ -75,7 +83,7 @@ def _get_run_test_scripts(testsuite_root):
 def _build_test(s2e_config, s2e_source_root, test_root):
     s2e_inc_dir = os.path.join(s2e_source_root, 'guest', 'common', 'include')
     env = os.environ.copy()
-    env['CFLAGS'] = '-I%s' % s2e_inc_dir
+    env['CFLAGS'] = f'-I{s2e_inc_dir}'
     env['S2ESRC'] = s2e_source_root
     env['WINDOWS_BUILD_HOST'] = s2e_config.get('windows_build_server', {}).get('host', '')
     env['WINDOWS_BUILD_USER'] = s2e_config.get('windows_build_server', {}).get('user', '')
@@ -99,7 +107,7 @@ def _call_post_project_gen_script(test_dir, test_config, options):
 
     script = os.path.join(test_dir, script)
     if not os.path.exists(script):
-        raise CommandError('%s does not exist' % script)
+        raise CommandError(f'{script} does not exist')
 
     env = os.environ.copy()
     env['PROJECT_DIR'] = options['project_path']
@@ -136,20 +144,27 @@ def _get_test_project_name(test, target_path, image_name):
 
     # We can have app images, which contain a slash
     image_name = image_name.replace('/', '_')
-    return 'testsuite/%s_%s_%s' % (test, target_name, image_name)
+    return f'testsuite/{test}/{target_name}_{image_name}'
 
 
 def _parse_target_arguments(test_root, test_config):
-    ret = []
-    args = test_config.get('target_arguments', [])
-    for arg in args:
-        ret.append(arg.replace('$(TEST_ROOT)', test_root))
-    return ret
+    processed_batches = []
+    arg_batches = test_config.get('target_arguments', [])
+    for arg_batch in arg_batches:
+        ret = []
+        for arg in arg_batch:
+            ret.append(arg.replace('$(TEST_ROOT)', test_root))
+        processed_batches.append(ret)
+
+    if not processed_batches:
+        processed_batches = [[]]
+
+    return processed_batches
 
 
 class TestsuiteGenerator(EnvCommand):
     def __init__(self):
-        super(TestsuiteGenerator, self).__init__()
+        super().__init__()
         self._cmd_options = {}
         self._img_templates = None
         self._images = None
@@ -177,11 +192,11 @@ class TestsuiteGenerator(EnvCommand):
             'creation_time': str(datetime.datetime.now())
         }
 
-        run_tests_template = '%s/%s' % (test, script_template)
+        run_tests_template = f'{test}/{script_template}'
         run_tests = render_template(ctx, run_tests_template, templates_dir=ts_dir)
 
         run_tests_path = os.path.join(self.projects_path(options['name']), 'run-tests')
-        with open(run_tests_path, 'w') as fp:
+        with open(run_tests_path, 'w', encoding='utf-8') as fp:
             fp.write(run_tests)
 
         st = os.stat(run_tests_path)
@@ -198,15 +213,15 @@ class TestsuiteGenerator(EnvCommand):
             host = self.config.get('windows_build_server', {}).get('host', '')
             user = self.config.get('windows_build_server', {}).get('user', '')
             if not host or not user:
-                msg = 'Test %s requires a Windows build server.\n' \
+                msg = f'Test {test_name} requires a Windows build server.\n' \
                       'Please check that your s2e.yaml file contains a valid Windows build server ' \
                       'configuration. Refer to the following page for details on how to set up the server:\n' \
-                      'http://s2e.systems/docs/WindowsEnvSetup.html' % test_name
+                      'http://s2e.systems/docs/WindowsEnvSetup.html'
                 raise CommandError(msg)
 
         return True
 
-    # pylint: disable=too-many-locals
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     def _handle_test(self, test_root, test, test_config):
         ts_dir = self.source_path('s2e', 'testsuite')
 
@@ -232,69 +247,71 @@ class TestsuiteGenerator(EnvCommand):
                         logger.warning(e)
                         continue
 
-                    target, proj_class = target_from_file(target_path)
-                    target.args = _parse_target_arguments(test_root, test_config)
-                    project = proj_class()
+                    arg_batches = _parse_target_arguments(test_root, test_config)
+                    for arg_idx, arg_batch in enumerate(arg_batches):
+                        target, proj_class = target_from_file(target_path)
+                        target.args = arg_batch
+                        project = proj_class()
 
-                    name = _get_test_project_name(test, target_path, image_name)
-                    options = {
-                        'image': image_name,
-                        'name': name,
-                        'target': target,
-                        'force': True,
-                        'project_path': self.projects_path(name),
-                        'testsuite_root': ts_dir
-                    }
-                    options.update(test_config.get('options', []))
-
-                    call_command(project, *[], **options)
-
-                    scripts = test_config.get('scripts', {})
-                    run_tests_template = scripts.get('run_tests', 'run-tests.tpl')
-                    self._generate_run_tests(ts_dir, test, run_tests_template, options)
-                    _call_post_project_gen_script(test_root, test_config, options)
+                        self._gen_project(
+                            ts_dir, test_config, test_root, test, target,
+                            target_path, image_name, project, arg_idx
+                        )
         else:
             for target_name in test_config['targets']:
                 target_path = _resolve_target_path(test_root, target_name, [])
+                arg_batches = _parse_target_arguments(test_root, test_config)
 
-                target, proj_class = target_from_file(target_path)
-                target.args = _parse_target_arguments(test_root, test_config)
-                project = proj_class()
+                for arg_idx, args in enumerate(arg_batches):
+                    target, proj_class = target_from_file(target_path)
+                    target.args = args
+                    project = proj_class()
 
-                images = project.get_usable_images(target, self._img_templates)
-                logger.info(images)
+                    images = project.get_usable_images(target, self._img_templates)
+                    logger.info(images)
 
-                for image_name in images:
-                    if image_name in blacklisted_images:
-                        logger.warning('%s is blacklisted, skipping tests for that image', image_name)
-                        continue
+                    for image_name in images:
+                        if image_name in blacklisted_images:
+                            logger.warning('%s is blacklisted, skipping tests for that image', image_name)
+                            continue
 
-                    if target_images and image_name not in target_images:
-                        logger.debug('%s is not in target-images, skipping', image_name)
-                        continue
+                        if target_images and image_name not in target_images:
+                            logger.debug('%s is not in target-images, skipping', image_name)
+                            continue
 
-                    name = _get_test_project_name(test, target_path, image_name)
-                    options = {
-                        'image': image_name,
-                        'name': name,
-                        'target': target,
-                        'force': True,
-                        'project_path': self.projects_path(name),
-                        'testsuite_root': ts_dir
-                    }
-                    options.update(test_config.get('options', []))
+                        self._gen_project(
+                            ts_dir, test_config, test_root, test, target,
+                            target_path, image_name, project, arg_idx
+                        )
 
-                    call_command(project, *[], **options)
+    # pylint: disable=too-many-arguments
+    def _gen_project(self, ts_dir, test_config, test_root, test, target, target_path, image_name, project, arg_idx):
+        name = _get_test_project_name(test, target_path, image_name)
+        name = f'{name}_{arg_idx}'
+        options = {
+            'image': image_name,
+            'name': name,
+            'target': target,
+            'force': True,
+            'project_path': self.projects_path(name),
+            'testsuite_root': ts_dir
+        }
+        options.update(test_config.get('options', []))
 
-                    scripts = test_config.get('scripts', {})
-                    run_tests_template = scripts.get('run_tests', 'run-tests.tpl')
-                    self._generate_run_tests(ts_dir, test, run_tests_template, options)
-                    _call_post_project_gen_script(test_root, test_config, options)
+        if not validate_arguments(options):
+            raise CommandError('Please check test case arguments')
+
+        call_command(project, *[], **options)
+
+        scripts = test_config.get('scripts', {})
+        run_tests_template = scripts.get('run_tests', 'run-tests.tpl')
+        self._generate_run_tests(ts_dir, test, run_tests_template, options)
+        _call_post_project_gen_script(test_root, test_config, options)
 
     def _get_tests(self):
         ts_dir = self.source_path('s2e', 'testsuite')
         if not os.path.isdir(ts_dir):
-            raise CommandError('%s does not exist. Please check that you updated the S2E source' % ts_dir)
+            raise CommandError(f'{ts_dir} does not exist. Please check that you updated the S2E source')
 
         tests = self._cmd_options['tests']
         if not tests:
@@ -340,7 +357,7 @@ class TestsuiteLister(EnvCommand):
             test_root = os.path.join(ts_dir, test)
 
             cfg_file = os.path.join(test_root, 'config.yml')
-            with open(cfg_file, 'r') as fp:
+            with open(cfg_file, 'r', encoding='utf-8') as fp:
                 config = yaml.safe_load(fp)['test']
 
             logger.info('%-25s: %s', test, config['description'])
@@ -351,14 +368,42 @@ def _get_max_instances(**options):
         # Determine optimal number of cores based on available memory
         cpus = psutil.cpu_count()
         mem = psutil.virtual_memory().available
-        logger.info('The system has %d CPUs and %d GB of available RAM', cpus, mem / (1 << 30))
 
-        logger.info('Average memory usage per S2E instance: %d GB',
-                    TestsuiteRunner.AVERAGE_S2E_MEM_USAGE / (1 << 30))
+        if options.get('log', True):
+            logger.info('The system has %d CPUs and %d GB of available RAM', cpus, mem / (1 << 30))
+            logger.info('Average memory usage per S2E instance: %d GB',
+                        TestsuiteRunner.AVERAGE_S2E_MEM_USAGE / (1 << 30))
         max_instances = int(mem / TestsuiteRunner.AVERAGE_S2E_MEM_USAGE)
         return min(cpus, max_instances)
 
     return options.get('instances')
+
+
+def _get_mem_free_percentage():
+    vm = psutil.virtual_memory()
+    return vm.available / vm.total * 100
+
+
+class TestCancelledException(Exception):
+    pass
+
+
+def _throttle(state):
+    # We don't enforce memory limits, best effort to avoid crashing the machine.
+    while _get_mem_free_percentage() < 10 and not state.get('terminating'):
+        logger.info('Not enough memory to start a new instance. Waiting.')
+        time.sleep(10)
+
+    # Prevent all instances from starting at the same time
+    lock = state.get('start_lock')
+
+    while not lock.acquire(timeout=1):
+        if state.get('terminating', False):
+            return False
+
+    time.sleep(0.5)
+    lock.release()
+    return True
 
 
 class TestsuiteRunner(EnvCommand):
@@ -369,6 +414,9 @@ class TestsuiteRunner(EnvCommand):
     AVERAGE_S2E_MEM_USAGE = 3 * 1024 * 1024 * 1024
 
     def call_script(self, state, script):
+        if not _throttle(state):
+            return
+
         logger.info('Starting %s', script)
         env = os.environ.copy()
         env['S2EDIR'] = self.env_path()
@@ -378,25 +426,49 @@ class TestsuiteRunner(EnvCommand):
 
         start_time = datetime.datetime.now()
 
-        with open(stdout, 'w') as so:
-            with open(stderr, 'w') as se:
+        with open(stdout, 'w', encoding='utf-8') as so:
+            with open(stderr, 'w', encoding='utf-8') as se:
                 status = None
                 try:
-                    subprocess.check_call([script], env=env, stdout=so, stderr=se)
+                    with subprocess.Popen([script], env=env, stdout=so, stderr=se) as p:
+                        while True:
+                            if state.get('terminating', False):
+                                p.terminate()
+                                p.wait()
+                                raise TestCancelledException()
+                            try:
+                                p.communicate(timeout=1)
+                            except subprocess.TimeoutExpired:
+                                pass
+
+                            if p.returncode is None:
+                                continue
+
+                            if not p.returncode:
+                                break
+
+                            if p.returncode:
+                                raise Exception(f'Error while running {script}')
+
                     status = 'SUCCESS'
-                except Exception:
+                except TestCancelledException:
+                    status = 'CANCELLED'
+                except Exception as e:
+                    logger.error(e)
                     status = 'FAILURE'
                 finally:
                     end_time = datetime.datetime.now()
                     diff_time = end_time - start_time
                     ms = divmod(diff_time.total_seconds(), 60)
-                    state['completed'] += 1
-                    logger.info('[%d/%d %02d:%02d] %s: %s',
-                                state['completed'], state['num_tests'], ms[0], ms[1], status, script)
-                    if status == 'FAILURE':
-                        logger.error('   Check %s for details', stdout)
-                        logger.error('   Check %s for details', stderr)
+                    with state.get('print_lock'):
+                        state['completed'] += 1
+                        logger.info('[%d/%d %02d:%02d] %s: %s',
+                                    state['completed'], state['num_tests'], ms[0], ms[1], status, script)
+                        if status == 'FAILURE':
+                            logger.error('   Check %s for details', stdout)
+                            logger.error('   Check %s for details', stderr)
 
+    # pylint: disable=too-many-locals
     def handle(self, *args, **options):
         logger.info('Running testsuite')
 
@@ -413,6 +485,11 @@ class TestsuiteRunner(EnvCommand):
         # This would also allow filtering by image name or any other part the project name.
         # By default, all tests are run.
         selected_tests = options['tests']
+        exclude_test = options.get('exclude_test')
+
+        if exclude_test:
+            logger.info('Excluding tests with prefix %s', exclude_test)
+
         if selected_tests:
             scripts_to_run = []
             for test in selected_tests:
@@ -425,18 +502,31 @@ class TestsuiteRunner(EnvCommand):
                          ' and check that the specified test exists.')
             return
 
+        old_scripts_to_run = scripts_to_run
+        scripts_to_run = []
+
+        for script in old_scripts_to_run:
+            if exclude_test and (exclude_test in script):
+                continue
+            scripts_to_run.append(script)
+
         send_signal_to_children_on_exit(signal.SIGKILL)
 
         pool = multiprocessing.dummy.Pool(actual_instances)
 
-        try:
-            state = {
-                'completed': 0,
-                'num_tests': len(scripts_to_run)
-            }
+        state = {
+            'completed': 0,
+            'num_tests': len(scripts_to_run),
+            'start_lock': threading.Lock(),
+            'print_lock': threading.Lock(),
+            'terminating': False,
+        }
 
+        original_sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, original_sigint_handler)
+
+        try:
             r = [pool.apply_async(self.call_script, (state, script,)) for script in scripts_to_run]
-            pool.close()
 
             # This works around a bug in Python 2.7, which prevents pool.join() from
             # being interrupted by ctrl + c.
@@ -445,8 +535,10 @@ class TestsuiteRunner(EnvCommand):
 
         except KeyboardInterrupt:
             logger.warning('Terminating testsuite (CTRL+C)')
+            state['terminating'] = True
             pool.terminate()
         finally:
+            pool.close()
             pool.join()
 
 
@@ -475,12 +567,16 @@ class Command(EnvCommand):
         run_ts_parser.add_argument('--instance-count', dest='instances', type=int,
                                    default=0, help='How many instances to run in parallel')
 
+        run_ts_parser.add_argument('--exclude-test', dest='exclude_test', type=str,
+                                   help='Test prefix to exclude')
+
+
         run_ts_parser.add_argument('tests', nargs='*', help='Tests to run (all if empty)')
 
         subparsers.add_parser('list', cmd=TestsuiteLister(),
                               help='Display available tests')
 
-        super(Command, self).add_arguments(parser)
+        super().add_arguments(parser)
 
     def handle(self, *args, **options):
         command = options.pop('command', ())
@@ -492,4 +588,4 @@ class Command(EnvCommand):
         elif command == 'list':
             call_command(TestsuiteLister(), *args, **options)
         else:
-            raise CommandError('Invalid command %s' % command)
+            raise CommandError(f'Invalid command {command}')

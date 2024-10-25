@@ -27,6 +27,8 @@ import logging
 import os
 import sys
 
+import distro
+
 # pylint: disable=no-name-in-module
 from sh import tar, ErrorReturnCode
 
@@ -62,7 +64,7 @@ def _decompress(path):
             directory=os.path.dirname(path), _out=sys.stdout,
             _err=sys.stderr)
     except ErrorReturnCode as e:
-        raise CommandError(e)
+        raise CommandError(e) from e
 
 
 class ImageDownloader:
@@ -87,13 +89,13 @@ class ImageDownloader:
     def _download_image(self, image, dest_dir):
         image_desc = self._templates.get(image)
         if not image_desc:
-            raise CommandError('%s is not a valid image name' % image)
+            raise CommandError(f'{image} is not a valid image name')
 
         url = self._templates[image].get('url')
         if not url:
-            raise CommandError('The image %s has not downloadable archive' % image)
+            raise CommandError(f'The image {image} has not downloadable archive')
 
-        dest_file = os.path.join(dest_dir, '%s.tar.xz' % image)
+        dest_file = os.path.join(dest_dir, f'{image}.tar.xz')
         _download(url, dest_file)
         _decompress(dest_file)
 
@@ -105,21 +107,19 @@ def _validate_version(descriptor, filename):
     version = descriptor.get('version')
     required_version = CONSTANTS['required_versions']['guest_images']
     if version != required_version:
-        raise CommandError('%s versions do not match (s2e-env: %.2f, image: '
-                           '%.2f). Make sure that you have the correct '
-                           'revision of the guest-images repository' %
-                           (filename, required_version, version))
+        raise CommandError(f'{filename} versions do not match (s2e-env: {required_version:.2f}, image: '
+                           f'{version:.2f}). Make sure that you have the correct '
+                           'revision of the guest-images repository')
 
 
 def _get_templates(img_build_dir, filename, key):
     images = os.path.join(img_build_dir, filename)
 
     try:
-        with open(images, 'r') as f:
+        with open(images, 'r', encoding='utf-8') as f:
             template_json = json.load(f)
     except:
-        raise CommandError('Could not parse %s. Something is wrong with the '
-                           'environment' % images)
+        raise CommandError(f'Could not parse {images}. Something is wrong with the environment') from None
 
     _validate_version(template_json, images)
 
@@ -147,7 +147,7 @@ def get_image_descriptor(image_dir):
     img_json_path = os.path.join(image_dir, 'image.json')
 
     try:
-        with open(img_json_path, 'r') as f:
+        with open(img_json_path, 'r', encoding='utf-8') as f:
             ret = json.load(f)
             _validate_version(ret, img_json_path)
             ret['path'] = os.path.join(image_dir, 'image.raw.s2e')
@@ -156,8 +156,7 @@ def get_image_descriptor(image_dir):
     except CommandError:
         raise
     except Exception as e:
-        raise CommandError('Unable to open image description %s: %s' %
-                           (img_json_path, e))
+        raise CommandError(f'Unable to open image description {img_json_path}: {e}') from e
 
 
 def get_all_images(templates, app_templates):
@@ -246,3 +245,65 @@ def select_guestfs(image_path, img_desc):
             ret.append(guestfs_path)
 
     return ret
+
+
+def select_best_image(base_templates, image_names):
+    """
+    Select the best image for the current host OS among the specified images.
+    """
+
+    id_name, version, _ = distro.linux_distribution(full_distribution_name=False)
+    id_name = id_name.lower()
+
+    # First try to match by name and version.
+    for image in image_names:
+        tpl = base_templates[image]
+        if tpl.get('os').get('name') == id_name and tpl.get('os').get('version') == version:
+            return image
+
+    # If that fails, match by name only.
+    for image in image_names:
+        tpl = base_templates[image]
+        if tpl.get('os').get('name') == id_name:
+            return image
+
+    # If nothing works, pick the first suitable image.
+    return image_names[0]
+
+
+def check_host_incompatibility(base_templates, image_name):
+    """
+    Warn users when the selected image may not work properly with binaries
+    built on the host.
+    """
+
+    id_name, version, _ = distro.linux_distribution(full_distribution_name=False)
+    id_name = id_name.lower()
+
+    tpl = base_templates[image_name]
+    guest_name = tpl.get('os').get('name')
+    guest_version = tpl.get('os').get('version')
+    if guest_name == id_name and guest_version.startswith(version):
+        return
+
+    logger.warning('Your host OS does not match the guest OS. '
+                    'To ensure that binaries built on the host run properly in the guest, '
+                    'both the host and the guest OS must be identical. You may want to build '
+                    'your binaries in a docker container that matches the guest OS.')
+
+    if id_name == 'ubuntu' and version == '22.02':
+        logger.error('The libc of the guest OS that you selected is not compatible with the libc on your host. '
+                        'Binaries that you build on your host will not run properly in the guest.')
+
+def split_image_name(image_name):
+    """
+    Split the image name into (base_image_name,app_name).
+    """
+    components = image_name.split('/')
+    if len(components) == 1:
+        return (components[0], None)
+
+    if len(components) == 2:
+        return (components[0], components[1])
+
+    raise Exception(f"Invalid image name {image_name}")

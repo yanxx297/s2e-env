@@ -57,8 +57,8 @@ class Command(EnvCommand):
         repo_dir = self.source_path('.repo')
         if not os.path.exists(repo_dir):
             raise CommandError(
-                '%s does not exist. Your environment is not supported by this version of s2e-env.\n'
-                'Please create a new environment.' % (repo_dir)
+                f'{repo_dir} does not exist. Your environment is not supported by this version of s2e-env.\n'
+                'Please create a new environment.'
             )
 
         os.chdir(self.source_path())
@@ -67,7 +67,7 @@ class Command(EnvCommand):
             logger.info('Updating S2E')
             repo.sync(_out=sys.stdout, _err=sys.stderr)
         except ErrorReturnCode as e:
-            raise CommandError(e)
+            raise CommandError(e) from e
         finally:
             # Change back to the original directory
             os.chdir(orig_dir)

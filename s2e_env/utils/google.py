@@ -22,57 +22,37 @@ SOFTWARE.
 
 
 import logging
-import sys
 import urllib.parse
 
+from alive_progress import alive_bar
 import requests
 
 
 logger = logging.getLogger(__name__)
 
-CHUNK_SIZE = 32768
-
-# Inspired from:
-# http://stackoverflow.com/questions/25010369/wget-curl-large-file-from-google-drive
-
-def _get_confirm_token(response):
-    for key, value in response.cookies.items():
-        if key.startswith('download_warning'):
-            return value
-
-    return None
+CHUNK_SIZE = 1024 * 128
 
 
 def _save_response_content(response, destination):
-    bytes_count = 0
-    next_count = 0
     with open(destination, 'wb') as f:
-        for chunk in response.iter_content(CHUNK_SIZE):
-            # filter out keep-alive new chunks
-            if chunk:
-                bytes_count += len(chunk)
-                next_count += len(chunk)
-                f.write(chunk)
-
-            if next_count > 1024 * 1024 * 10:
-                sys.stdout.write('Downloaded %d bytes\r' % bytes_count)
-                sys.stdout.flush()
-                next_count = 0
+        length = int(response.headers.get('Content-Length'))
+        logger.info('File size: %d bytes', length)
+        with alive_bar(length) as progress:
+            for chunk in response.iter_content(CHUNK_SIZE):
+                # filter out keep-alive new chunks
+                if chunk:
+                    f.write(chunk)
+                    # pylint: disable=not-callable
+                    progress(len(chunk))
 
 
 def _download(docid, destination):
-    url = 'https://docs.google.com/uc?export=download'
+    url = 'https://drive.usercontent.google.com/download'
 
     session = requests.Session()
 
     logger.info('Requesting %s with id=%s', url, docid)
-    response = session.get(url, params={'id': docid}, stream=True)
-    token = _get_confirm_token(response)
-
-    if token:
-        logger.info('Sending confirmation token')
-        params = {'id': docid, 'confirm': token}
-        response = session.get(url, params=params, stream=True)
+    response = session.get(url, params={'id': docid, 'confirm':'t'}, stream=True)
 
     _save_response_content(response, destination)
 

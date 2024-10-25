@@ -53,13 +53,11 @@ def _check_project_dir(project_dir, force=False):
         return
 
     if force:
-        logger.info('\'%s\' already exists - removing',
-                    os.path.basename(project_dir))
+        logger.info('\'%s\' already exists - removing', os.path.basename(project_dir))
         shutil.rmtree(project_dir)
     else:
-        raise CommandError('\'%s\' already exists. Either remove this '
-                           'project or use the force option' %
-                           os.path.basename(project_dir))
+        raise CommandError(f'\'{os.path.basename(project_dir)}\' already exists. Either remove this '
+                           'project or use the force option')
 
 
 def is_valid_arch(target_arch, os_desc):
@@ -79,32 +77,41 @@ class BaseProject(AbstractProject):
     analysis on the target.
     """
 
-    def __init__(self, bootstrap_template, lua_template):
-        super(BaseProject, self).__init__()
+    supported_tools = []
+
+    def __init__(self, bootstrap_template, lua_template, image_override=None, misc_templates=None):
+        super().__init__()
 
         self._bootstrap_template = bootstrap_template
         self._lua_template = lua_template
+        self._image_override = image_override
+        self._misc_templates = misc_templates
 
     def _configure(self, target, *args, **options):
         if target.is_empty():
             logger.warning('Creating a project without a target file. You must manually edit bootstrap.sh')
 
         # Decide on the image to be used
-        img_desc = self._select_image(target, options.get('image'),
-                                      options.get('download_image', False))
+        img_desc = None
+        guestfs_paths = []
 
-        # Check architecture consistency (if the target has been specified)
-        if target.path and not is_valid_arch(target.arch, img_desc['os']):
-            raise CommandError('Binary is %s while VM image is %s. Please '
-                               'choose another image' % (target.arch,
-                                                         img_desc['os']['arch']))
+        if self._image_override:
+            img_desc = self._image_override
+        else:
+            img_desc = self._select_image(target, options.get('image'),
+                                        options.get('download_image', False))
 
-        # Determine if guestfs is available for this image
-        guestfs_paths = self._select_guestfs(img_desc)
-        if not guestfs_paths:
-            logger.warning('No guestfs available. The VMI plugin may not run optimally')
+            # Check architecture consistency (if the target has been specified)
+            if target.path and not is_valid_arch(target.arch, img_desc['os']):
+                raise CommandError(f'Binary is {target.arch} while VM image is {img_desc["os"]["arch"]}. Please '
+                                'choose another image')
 
-        target.translated_path = self._translate_target_path_to_guestfs(target.path, guestfs_paths)
+            # Determine if guestfs is available for this image
+            guestfs_paths = self._select_guestfs(img_desc)
+            if not guestfs_paths:
+                logger.warning('No guestfs available. The VMI plugin may not run optimally')
+
+            target.translated_path = self._translate_target_path_to_guestfs(target.path, guestfs_paths)
 
         # Generate the name of the project directory. The default project name
         # is the target program name without any file extension
@@ -166,9 +173,13 @@ class BaseProject(AbstractProject):
 
             # This will add analysis overhead, so disable unless requested by
             # the user. Also enabled by default for Decree targets.
+            # TODO: pass these directly from the command line args
             'enable_pov_generation': options.get('enable_pov_generation', False),
+            'enable_cfi': options.get('enable_cfi', False),
+            'enable_tickler': options.get('enable_tickler', False),
 
-            'single_path': options.get('single_path', False)
+            'single_path': options.get('single_path', False),
+            'custom_lua_string': options.get('custom_lua_string', '')
         }
 
         # Do some basic analysis on the target (if it exists)
@@ -180,6 +191,10 @@ class BaseProject(AbstractProject):
 
         # After this point the config dictionary should NOT be modified
         self._finalize_config(config)
+
+        for tool in options.get('tools', []):
+            if tool not in self.supported_tools:
+                raise CommandError(f'This target does not support the {tool} tool')
 
         return config
 
@@ -217,6 +232,7 @@ class BaseProject(AbstractProject):
         self._create_launch_script(project_dir, config)
         self._create_lua_config(project_dir, config)
         self._create_bootstrap(project_dir, config)
+        self._create_misc_templates(project_dir, config)
 
         # Even though the AbstractProject will save the project description, we
         # need it to be able to generate recipes below
@@ -286,15 +302,21 @@ class BaseProject(AbstractProject):
         """
         logger.info('Creating launch script')
 
+        image = config.get('image')
+        rel_image_path = None
+        if image.get('path', None):
+            rel_image_path = os.path.relpath(config['image']['path'], self.env_path())
+
         context = {
             'creation_time': config['creation_time'],
             'env_dir': self.env_path(),
-            'rel_image_path': os.path.relpath(config['image']['path'], self.env_path()),
-            'qemu_arch': config['image']['qemu_build'],
-            'qemu_memory': config['image']['memory'],
-            'qemu_snapshot': config['image']['snapshot'],
-            'qemu_extra_flags': config['image']['qemu_extra_flags'],
-            'single_path': config['single_path'],
+            'rel_image_path': rel_image_path,
+            'qemu_arch': image['qemu_build'],
+            'qemu_memory': image['memory'],
+            'qemu_snapshot': image['snapshot'],
+            'qemu_extra_flags': image['qemu_extra_flags'],
+            'qemu_bios': config.get('bios', ''),
+            'single_path': config['single_path']
         }
 
         template = 'launch-s2e.sh'
@@ -309,24 +331,9 @@ class BaseProject(AbstractProject):
 
         self._copy_lua_library(project_dir)
 
-        context = {
-            'creation_time': config['creation_time'],
-            'target': config['target'],
-            'target_lua_template': self._lua_template,
-            'project_dir': project_dir,
-            'project_name': config['project_name'],
-            'use_seeds': config['use_seeds'],
-            'use_cupa': config['use_cupa'],
-            'use_test_case_generator': config['use_test_case_generator'],
-            'enable_pov_generation': config['enable_pov_generation'],
-            'seeds_dir': config['seeds_dir'],
-            'single_path': config['single_path'],
-            'has_guestfs': config['has_guestfs'],
-            'guestfs_paths': config['guestfs_paths'],
-            'recipes_dir': config['recipes_dir'],
-            'modules': config['modules'],
-            'processes': config['processes'],
-        }
+        context = config.copy()
+        context['target_lua_template'] = self._lua_template
+        context['project_dir'] = project_dir
 
         for template in ('s2e-config.lua', 'models.lua'):
             output_path = os.path.join(project_dir, template)
@@ -336,25 +343,31 @@ class BaseProject(AbstractProject):
         """
         Create the S2E bootstrap script.
         """
+        if not self._bootstrap_template:
+            logger.info('Project does not support bootstrap script')
+            return
+
         logger.info('Creating S2E bootstrap script')
 
-        context = {
-            'project_name': config['project_name'],
-            'creation_time': config['creation_time'],
-            'target': config['target'],
-            'sym_args': config['sym_args'],
-            'target_bootstrap_template': self._bootstrap_template,
-            'image_arch': config['image']['os']['arch'],
-            'use_seeds': config['use_seeds'],
-            'use_fault_injection': config['use_fault_injection'],
-            'enable_pov_generation': config['enable_pov_generation'],
-            'single_path': config['single_path'],
-            'dynamically_linked': config['dynamically_linked'],
-            'project_type': config['project_type'],
-            'modules': config['modules'],
-            'processes': config['processes'],
-        }
+        context = config.copy()
+        context['target_bootstrap_template'] = self._bootstrap_template
+        context['image_arch'] = config['image']['os']['arch']
 
         template = 'bootstrap.sh'
         output_path = os.path.join(project_dir, template)
         render_template(context, template, output_path)
+
+    def _create_misc_templates(self, project_dir, config):
+        """
+        Render any other optional scripts.
+        """
+        if not self._misc_templates:
+            return
+
+        context = config.copy()
+        context['env_dir'] = self.env_path()
+
+        for template in self._misc_templates:
+            output_path = os.path.join(project_dir, template)
+            executable = template.endswith('.sh')
+            render_template(context, template, output_path, executable=executable)

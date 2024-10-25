@@ -29,9 +29,10 @@ from magic import Magic
 
 from s2e_env.command import EnvCommand, CommandError
 from s2e_env.commands.project_creation import CGCProject, LinuxProject, AbstractProject
-from s2e_env.commands.project_creation import WindowsProject, \
-        WindowsDLLProject, WindowsDriverProject
+from s2e_env.commands.project_creation import WindowsExeProject, \
+        WindowsDLLProject, WindowsDriverProject, BIOSProject
 from s2e_env.commands.project_creation import Target
+from s2e_env.commands.project_creation.abstract_project import validate_arguments, SUPPORTED_TOOLS
 from s2e_env.infparser.driver import Driver
 from s2e_env.manage import call_command
 
@@ -41,9 +42,10 @@ logger = logging.getLogger('new_project')
 PROJECT_TYPES = {
     'cgc': CGCProject,
     'linux': LinuxProject,
-    'windows': WindowsProject,
+    'windows': WindowsExeProject,
     'windows_dll': WindowsDLLProject,
     'windows_driver': WindowsDriverProject,
+    'bios': BIOSProject
 }
 
 # Paths
@@ -62,6 +64,9 @@ PE32_REGEX = re.compile(r'^PE32 executable')
 PE64_REGEX = re.compile(r'^PE32\+ executable')
 MSDOS_REGEX = re.compile(r'^MS-DOS executable')
 
+ARCH_I386 = 'i386'
+ARCH_X86_64 = 'x86_64'
+SUPPORTED_ARCHS=[ARCH_I386, ARCH_X86_64]
 
 def _determine_arch_and_proj(target_path):
     """
@@ -78,16 +83,16 @@ def _determine_arch_and_proj(target_path):
     """
     default_magic = Magic()
     magic_checks = (
-        (Magic(magic_file=CGC_MAGIC), CGC_REGEX, CGCProject, 'i386', 'decree'),
-        (default_magic, ELF32_REGEX, LinuxProject, 'i386', 'linux'),
-        (default_magic, ELF64_REGEX, LinuxProject, 'x86_64', 'linux'),
-        (default_magic, DLL32_REGEX, WindowsDLLProject, 'i386', 'windows'),
-        (default_magic, DLL64_REGEX, WindowsDLLProject, 'x86_64', 'windows'),
-        (default_magic, WIN32_DRIVER_REGEX, WindowsDriverProject, 'i386', 'windows'),
-        (default_magic, WIN64_DRIVER_REGEX, WindowsDriverProject, 'x86_64', 'windows'),
-        (default_magic, PE32_REGEX, WindowsProject, 'i386', 'windows'),
-        (default_magic, PE64_REGEX, WindowsProject, 'x86_64', 'windows'),
-        (default_magic, MSDOS_REGEX, WindowsProject, 'i386', 'windows'),
+        (Magic(magic_file=CGC_MAGIC), CGC_REGEX, CGCProject, ARCH_I386, 'decree'),
+        (default_magic, ELF32_REGEX, LinuxProject, ARCH_I386, 'linux'),
+        (default_magic, ELF64_REGEX, LinuxProject, ARCH_X86_64, 'linux'),
+        (default_magic, DLL32_REGEX, WindowsDLLProject, ARCH_I386, 'windows'),
+        (default_magic, DLL64_REGEX, WindowsDLLProject, ARCH_X86_64, 'windows'),
+        (default_magic, WIN32_DRIVER_REGEX, WindowsDriverProject, ARCH_I386, 'windows'),
+        (default_magic, WIN64_DRIVER_REGEX, WindowsDriverProject, ARCH_X86_64, 'windows'),
+        (default_magic, PE32_REGEX, WindowsExeProject, ARCH_I386, 'windows'),
+        (default_magic, PE64_REGEX, WindowsExeProject, ARCH_X86_64, 'windows'),
+        (default_magic, MSDOS_REGEX, WindowsExeProject, ARCH_I386, 'windows'),
     )
 
     # Need to resolve symbolic links, otherwise magic will report the file type
@@ -123,7 +128,7 @@ def _extract_inf_files(target_path):
             if full_path.endswith('.cat'):
                 logger.warning('Catalog file %s is missing', full_path)
                 continue
-            raise Exception('%s does not exist' % full_path)
+            raise Exception(f'{full_path} does not exist')
 
         logger.info('    %s', full_path)
         file_paths.append(full_path)
@@ -139,7 +144,7 @@ def _translate_target_to_files(path):
     """
 
     if not os.path.isfile(path):
-        raise Exception('Target %s does not exist' % path)
+        raise Exception(f'Target {path} does not exist')
 
     if path.endswith('.inf'):
         logger.info('Detected Windows INF file, attempting to create a driver project...')
@@ -182,18 +187,21 @@ def _parse_sym_args(sym_args_str):
     for i in sym_args_str.split(' '):
         try:
             sym_args.append(int(i))
-        except ValueError:
-            raise argparse.ArgumentTypeError('\'%s\' is not a valid index' % i)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(f'\'{i}\' is not a valid index') from e
 
     return sym_args
 
 
-def target_from_file(path, args=None, project_class=None):
+def target_from_file(path, args=None, project_class=None, custom_arch=None):
     files = _translate_target_to_files(path)
     path_to_analyze = files[0]
     aux_files = files[1:]
 
     arch, op_sys, proj_class = _determine_arch_and_proj(path_to_analyze)
+    if not arch:
+        arch = custom_arch
+
     if not arch:
         raise Exception(f'Could not determine architecture for {path_to_analyze}')
 
@@ -207,13 +215,28 @@ def target_from_file(path, args=None, project_class=None):
 
 
 def _handle_with_file(target_path, target_args, proj_class, *args, **options):
-    target, proj_class = target_from_file(target_path, target_args, proj_class)
+    arch = options.get('arch', None)
+    if arch and arch not in SUPPORTED_ARCHS:
+        raise Exception(f'Architecture {arch} is not supported')
+
+    target, proj_class = target_from_file(target_path, target_args, proj_class, arch)
     options['target'] = target
 
     return call_command(proj_class(), *args, **options)
 
 
+def _get_project_class(**options):
+    project_types = list(PROJECT_TYPES.keys())
+    if options['type'] not in project_types:
+        raise CommandError('An empty project requires a type. Use the -t '
+                            'option and specify one from %s' % project_types)
+    return PROJECT_TYPES[options['type']]
+
+
 def _handle_empty_project(proj_class, *args, **options):
+    if not proj_class:
+        raise CommandError('Please specify a project type')
+
     if not options['no_target']:
         raise CommandError('No target binary specified. Use the -m option to '
                            'create an empty project')
@@ -225,15 +248,6 @@ def _handle_empty_project(proj_class, *args, **options):
     if not options['name']:
         raise CommandError('An empty project requires a name. Use the -n '
                            'option to specify one')
-
-    # If the project class wasn't explicitly overridden programmatically, get
-    # one of the default project classes from the command line
-    if not proj_class:
-        project_types = list(PROJECT_TYPES.keys())
-        if options['type'] not in project_types:
-            raise CommandError('An empty project requires a type. Use the -t '
-                               'option and specify one from %s' % project_types)
-        proj_class = PROJECT_TYPES[options['type']]
 
     options['target'] = Target.empty()
 
@@ -248,7 +262,7 @@ class Command(EnvCommand):
     help = 'Initialize a new analysis project.'
 
     def add_arguments(self, parser):
-        super(Command, self).add_arguments(parser)
+        super().add_arguments(parser)
 
         parser.add_argument('target', nargs='?',
                             help='Path to the target file to analyze')
@@ -276,9 +290,9 @@ class Command(EnvCommand):
                             help='Create an empty, target-less project. Used '
                                  'when no binary is needed')
 
+        project_types_keys = ','.join(list(PROJECT_TYPES.keys()))
         parser.add_argument('-t', '--type', required=False, default=None,
-                            help='Project type (%s), valid only when creating empty projects' %
-                            ','.join(list(PROJECT_TYPES.keys())))
+                            help=f'Project type ({project_types_keys}), valid only when creating empty projects')
 
         parser.add_argument('-s', '--use-seeds', action='store_true',
                             help='Use this option to use seeds for creating '
@@ -286,8 +300,14 @@ class Command(EnvCommand):
                                  'seeds themselves and place them in the '
                                  'project\'s ``seeds`` directory')
 
-        parser.add_argument('--enable-pov-generation', action='store_true',
-                            help='Enables PoV generation')
+        parser.add_argument('--arch', required=False, default=None,
+                            help='Architecture for binaries whose architecture cannot be autodetected. '
+                                 f'Supported architectures: {SUPPORTED_ARCHS}')
+
+        parser.add_argument('--tools', type=lambda s: s.split(','),
+                            default=[],
+                            help='Comma-separated list of tools to enable '
+                                 f'(supported tools: {",".join(SUPPORTED_TOOLS)})')
 
         parser.add_argument('--single-path', action='store_true', default=False,
                             help='Enables single-path mode, no symbolic execution possible')
@@ -301,22 +321,7 @@ class Command(EnvCommand):
                                  'exists, replace it')
 
     def handle(self, *args, **options):
-        # Check argument consistency
-        has_errors = False
-        if options['single_path']:
-            if options['use_seeds']:
-                logger.error('Cannot use seeds in single-path mode')
-                has_errors = True
-
-            if options['enable_pov_generation']:
-                logger.error('Cannot use POV generation in single-path mode')
-                has_errors = True
-
-            if '@@' in options['target_args']:
-                logger.error('Cannot use symbolic input in single-path mode')
-                has_errors = True
-
-        if has_errors:
+        if not validate_arguments(options):
             return
 
         # The 'project_class' option is not exposed as a command-line argument:
@@ -324,6 +329,7 @@ class Command(EnvCommand):
         # It provides a class that is instantiated with the current
         # command-line arguments and options
         proj_class = options.pop('project_class', None)
+
         if options['target']:
             _handle_with_file(options.pop('target'), options.pop('target_args'), proj_class, *args, **options)
         else:

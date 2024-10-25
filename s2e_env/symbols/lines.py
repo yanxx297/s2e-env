@@ -60,7 +60,7 @@ class LineInfoEntry:
         return self._addr < other._addr
 
     def __str__(self):
-        return '%s:%d (%#x)' % (self._filename, self._line, self._addr)
+        return f'{self._filename}:{self._line} (0x{self._addr:x})'
 
 
 class LinesByAddr:
@@ -71,8 +71,21 @@ class LinesByAddr:
 
     __slots__ = ('_lines',)
 
-    def __init__(self):
+    def __init__(self, lines = None):
         self._lines = []
+
+        if not lines:
+            return
+
+        for file_path, data in list(lines.items()):
+            for line in data.get('lines', []):
+                line_number = line[0]
+                line_addresses = line[1]
+                for line_address in line_addresses:
+                    sym = LineInfoEntry(file_path, line_number, line_address)
+                    self._lines.append(sym)
+
+        self._lines.sort()
 
     def _index(self, x):
         # Find rightmost value less than or equal to x
