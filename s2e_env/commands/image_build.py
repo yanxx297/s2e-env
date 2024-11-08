@@ -427,10 +427,10 @@ class Command(EnvCommand):
 
         if self._use_kvm:
             _check_kvm()
-            _check_groups_kvm()
+            #_check_groups_kvm()
 
         _check_groups_docker()
-        _check_vmlinux()
+        #_check_vmlinux()
 
         self._has_cow = _check_cow(self.image_path())
 
